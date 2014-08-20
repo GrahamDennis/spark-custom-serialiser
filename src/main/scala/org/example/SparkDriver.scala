@@ -12,13 +12,6 @@ import scala.util.Random
 
 class MyCustomClass
 
-class MyRegistrator extends KryoRegistrator {
-  override def registerClasses(kryo: Kryo) {
-    Console.err.println("################# MyRegistrator called")
-    kryo.register(classOf[MyCustomClass])
-  }
-}
-
 class WrapperSerializer(conf: SparkConf) extends KryoSerializer(conf) {
   override def newKryo(): Kryo = {
     println("## Called newKryo!")
@@ -33,16 +26,10 @@ object SparkDriver {
     val conf = new SparkConf()
     .setAll(Map(
       "spark.serializer" -> "org.example.WrapperSerializer",
-                 // "spark.serializer" -> "org.apache.spark.serializer.KryoSerializer",
-      "spark.kryo.registrator" -> "org.example.MyRegistrator",
       "spark.task.maxFailures" -> "1"
       ))
 
-    println("We have a Spark config")
-
-    val sc = new SparkContext(conf.setAppName("Spark with Kryo Serialisation"))
-
-    println("We have a Spark context")
+    val sc = new SparkContext(conf.setAppName("Spark with Custom Serialiser"))
 
     val numElements = 10000
 

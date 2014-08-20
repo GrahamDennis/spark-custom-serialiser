@@ -1,52 +1,74 @@
-# Spark Kryo Serialisation bug
+# Spark Custom Serialisation
 
-Using Spark with Kryo serialisation and a custom Kryo registrator (to register custom classes with Kryo) can cause problems in Spark.  These problems appear as a failure during Kryo deserialisation and I have variously seen the following failures:
+Spark cannot currently use a custom serialiser that is shipped with the application jar.  Trying to do this causes a `java.lang.ClassNotFoundException` when trying to instantiate the custom serialiser in the Executor processes.  This occurs because Spark attempts to instantiate the custom serialiser *before* the application jar has been shipped to the Executor process.  This repository is a simple demonstration of the problem.
 
-    java.lang.ClassCastException: scala.Tuple1 cannot be cast to scala.Product2
-    java.lang.ClassNotFoundException
-    java.lang.IndexOutOfBoundsException
-
-I've verified this problem in Spark 1.0.0 and Spark 1.0.2.  My current hypothesis is described below.
+I've verified this problem in Spark 1.0.2.
 
 To build this repository and demonstrate the problem, run:
 
     # Build the .jar file
     ./gradlew build -i
-    # copy the built jar file in build/libs/spark-kryo-serialisation-0.0.1.jar to your spark master, and submit:
-    spark-submit --class org.example.SparkDriver --master spark://YOUR-SPARK-MASTER:7077 spark-kryo-serialisation-0.0.1.jar
-    # Note that this mustn't be run locally; You need to have at least two nodes to force Kryo serialisation / deserialisation.
-    # I have tested this with a 4-worker Spark 1.0.0 cluster.
+    # Run the application locally but in cluster-simulation mode
+    spark-submit --class org.example.SparkDriver --master local-cluster[2,1,512] build/libs/spark-custom-serialiser-0.0.1.jar
+    # Note that succeeds using --master local because the application jar is available to the process at launch time.
 
-The problem appears in the master node logs as:
+The problem appears in the master logs as:
 
-    14/08/06 17:42:32 WARN scheduler.TaskSetManager: Loss was due to java.lang.ClassCastException
-    java.lang.ClassCastException: scala.Tuple1 cannot be cast to scala.Product2
-    	at org.apache.spark.scheduler.ShuffleMapTask$$anonfun$runTask$1.apply(ShuffleMapTask.scala:159)
-    	at org.apache.spark.scheduler.ShuffleMapTask$$anonfun$runTask$1.apply(ShuffleMapTask.scala:158)
-    	at scala.collection.Iterator$class.foreach(Iterator.scala:727)
-    	at org.apache.spark.InterruptibleIterator.foreach(InterruptibleIterator.scala:28)
-    	at org.apache.spark.scheduler.ShuffleMapTask.runTask(ShuffleMapTask.scala:158)
-    	at org.apache.spark.scheduler.ShuffleMapTask.runTask(ShuffleMapTask.scala:99)
-    	at org.apache.spark.scheduler.Task.run(Task.scala:51)
-    	at org.apache.spark.executor.Executor$TaskRunner.run(Executor.scala:187)
-    	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1145)
-    	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:615)
-    	at java.lang.Thread.run(Thread.java:745)
+    Exception in thread "main" org.apache.spark.SparkException: Job aborted due to stage failure: Task 1.0:0 failed 1 times, most recent failure: TID 0 on host 10.202.68.146 failed for unknown reason
+    Driver stacktrace:
+    	at org.apache.spark.scheduler.DAGScheduler.org$apache$spark$scheduler$DAGScheduler$$failJobAndIndependentStages(DAGScheduler.scala:1044)
+    	at org.apache.spark.scheduler.DAGScheduler$$anonfun$abortStage$1.apply(DAGScheduler.scala:1028)
+    	at org.apache.spark.scheduler.DAGScheduler$$anonfun$abortStage$1.apply(DAGScheduler.scala:1026)
+    	at scala.collection.mutable.ResizableArray$class.foreach(ResizableArray.scala:59)
+    	at scala.collection.mutable.ArrayBuffer.foreach(ArrayBuffer.scala:47)
+    	at org.apache.spark.scheduler.DAGScheduler.abortStage(DAGScheduler.scala:1026)
+    	at org.apache.spark.scheduler.DAGScheduler$$anonfun$handleTaskSetFailed$1.apply(DAGScheduler.scala:634)
+    	at org.apache.spark.scheduler.DAGScheduler$$anonfun$handleTaskSetFailed$1.apply(DAGScheduler.scala:634)
+    	at scala.Option.foreach(Option.scala:236)
+    	at org.apache.spark.scheduler.DAGScheduler.handleTaskSetFailed(DAGScheduler.scala:634)
+    	at org.apache.spark.scheduler.DAGSchedulerEventProcessActor$$anonfun$receive$2.applyOrElse(DAGScheduler.scala:1229)
+    	at akka.actor.ActorCell.receiveMessage(ActorCell.scala:498)
+    	at akka.actor.ActorCell.invoke(ActorCell.scala:456)
+    	at akka.dispatch.Mailbox.processMailbox(Mailbox.scala:237)
+    	at akka.dispatch.Mailbox.run(Mailbox.scala:219)
+    	at akka.dispatch.ForkJoinExecutorConfigurator$AkkaForkJoinTask.exec(AbstractDispatcher.scala:386)
+    	at scala.concurrent.forkjoin.ForkJoinTask.doExec(ForkJoinTask.java:260)
+    	at scala.concurrent.forkjoin.ForkJoinPool$WorkQueue.runTask(ForkJoinPool.java:1339)
+    	at scala.concurrent.forkjoin.ForkJoinPool.runWorker(ForkJoinPool.java:1979)
+    	at scala.concurrent.forkjoin.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:107)
 
-Taking a look at the worker node stderr logs reveals the root cause (this may not appear on all worker nodes):
+The root cause of the problem appears in the worker node logs as:
 
-    14/08/06 17:42:31 ERROR serializer.KryoSerializer: Failed to run spark.kryo.registrator
-    java.lang.ClassNotFoundException: org.example.MyRegistrator
+    14/08/19 11:46:51 ERROR OneForOneStrategy: org.example.WrapperSerializer
+    java.lang.ClassNotFoundException: org.example.WrapperSerializer
+        at java.net.URLClassLoader$1.run(URLClassLoader.java:366)
+        at java.net.URLClassLoader$1.run(URLClassLoader.java:355)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at java.net.URLClassLoader.findClass(URLClassLoader.java:354)
+        at java.lang.ClassLoader.loadClass(ClassLoader.java:425)
+        at sun.misc.Launcher$AppClassLoader.loadClass(Launcher.java:308)
+        at java.lang.ClassLoader.loadClass(ClassLoader.java:358)
+        at java.lang.Class.forName0(Native Method)
+        at java.lang.Class.forName(Class.java:270)
+        at org.apache.spark.SparkEnv$.instantiateClass$1(SparkEnv.scala:161)
+        at org.apache.spark.SparkEnv$.instantiateClassFromConf$1(SparkEnv.scala:182)
+        at org.apache.spark.SparkEnv$.create(SparkEnv.scala:185)
+        at org.apache.spark.executor.Executor.<init>(Executor.scala:87)
+        at org.apache.spark.executor.CoarseGrainedExecutorBackend$$anonfun$receiveWithLogging$1.applyOrElse(CoarseGrainedExecutorBackend.scala:60)
+        at scala.runtime.AbstractPartialFunction$mcVL$sp.apply$mcVL$sp(AbstractPartialFunction.scala:33)
+        at scala.runtime.AbstractPartialFunction$mcVL$sp.apply(AbstractPartialFunction.scala:33)
+        at scala.runtime.AbstractPartialFunction$mcVL$sp.apply(AbstractPartialFunction.scala:25)
+        at org.apache.spark.util.ActorLogReceive$$anon$1.apply(ActorLogReceive.scala:53)
+        at org.apache.spark.util.ActorLogReceive$$anon$1.apply(ActorLogReceive.scala:42)
+        at scala.PartialFunction$class.applyOrElse(PartialFunction.scala:118)
+        at org.apache.spark.util.ActorLogReceive$$anon$1.applyOrElse(ActorLogReceive.scala:42)
+        at akka.actor.ActorCell.receiveMessage(ActorCell.scala:498)
+        at akka.actor.ActorCell.invoke(ActorCell.scala:456)
+        at akka.dispatch.Mailbox.processMailbox(Mailbox.scala:237)
+        at akka.dispatch.Mailbox.run(Mailbox.scala:219)
+        at akka.dispatch.ForkJoinExecutorConfigurator$AkkaForkJoinTask.exec(AbstractDispatcher.scala:386)
+        at scala.concurrent.forkjoin.ForkJoinTask.doExec(ForkJoinTask.java:260)
+        at scala.concurrent.forkjoin.ForkJoinPool$WorkQueue.runTask(ForkJoinPool.java:1339)
+        at scala.concurrent.forkjoin.ForkJoinPool.runWorker(ForkJoinPool.java:1979)
+        at scala.concurrent.forkjoin.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:107)
 
-The `org.example.MyRegistrator` class is included in the `spark-kryo-serialisation-0.0.1.jar` file, which *is* distributed to the workers, and *is* accessible by them.  This is demonstrated by other lines in the same log file of the form:
-
-    ################# MyRegistrator called
-
-This output is produced when the `org.example.MyRegistrator` class is called by Spark's Kryo serialisation code.
-
-## Root cause hypothesis
-
-1. Kryo doesn't serialise class names, but instead serialises ID numbers for classes.  These ID numbers are generated when classes are registered, and are assigned in order.  Thus for serialisation & deserialisation to work, the classes must be registered in the same order every time, on all nodes.
-2. The first-order problem I was seeing was "ClassNotFoundException" or "ClassCastException" or "IndexOutOfBoundsException".  These are all because one or more nodes have different ID number —> class mappings, and thus Kryo tries to deserialise data using the wrong class.  This will cause different errors depending on exactly what data is in the buffer when the class ID numbers mismatch.
-3. The cause of this problem is that classes aren't being registered in the same order.  To register custom classes with Kryo, Spark provides a hook via the config option "spark.kryo.registrator" with which you can register custom classes with Kryo.  Sometimes Spark fails to find my class, which appears as a "Failed to run spark.kryo.registrator" error message.  In this situation, Spark really should bail, but instead it catches the error and then continues to register classes.  Thus some nodes will have different Class ID —> class mappings.  Note that the "Failed to run spark.kryo.registrator" does not appear in the console output on master, or in the Web UI for the various stages, *only* in the worker stderr logs.
-4. The cause of this problem is that some threads in the Executor process have different class loaders.  The threads that run Spark jobs are modified after they are launched to only have your application jar on the class path (and anything else added via SparkContext.addJar or SparkConfig.setJars).  This happens in `org.apache.spark.executor.Executor.TaskRunner.run`.  Other threads in the Executor process do not have your application jar available to them.  In particular, there are a number of threads associated with the `ConnectionManager` which send & receive data between spark nodes.  These threads may serialise and/or deserialise using Kryo, but they do not have the application jar available from their class loader, and thus looking up the "spark.kryo.registrator" will fail!  This causes the "Failed to run spark.kryo.registrator" message, and thus the kryo deserialisation errors later on.
